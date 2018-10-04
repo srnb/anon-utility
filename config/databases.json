@@ -1,0 +1,18 @@
+{
+    "gdaScoreBankingRaw": {
+        "host": "db001.gda-score.org",
+        "port": 5432,
+        "dbname": "banking",
+        "user": "gda-score_ro_user",
+        "password": "moquaiR7",
+        "type": "postgres"
+    },
+    "cloakBankingAnon": {
+        "host": "attack.aircloak.com",
+        "port": 8432,
+        "dbname": "gda_banking",
+        "user": "basavara@rhrk.uni-kl.de",
+        "password": "workisworship",
+        "type": "aircloak"
+    }
+}
