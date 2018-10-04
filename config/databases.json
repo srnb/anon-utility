@@ -4,15 +4,15 @@
         "port": 5432,
         "dbname": "banking",
         "user": "gda-score_ro_user",
-        "password": "moquaiR7",
+        "password": "",
         "type": "postgres"
     },
     "cloakBankingAnon": {
         "host": "attack.aircloak.com",
         "port": 8432,
         "dbname": "gda_banking",
-        "user": "basavara@rhrk.uni-kl.de",
-        "password": "workisworship",
+        "user": "",
+        "password": "",
         "type": "aircloak"
     }
 }
