@@ -1,0 +1,19 @@
+[
+
+    {
+        "name": "accountsTableUtilityMeasure",
+        "rawDb": "gdaScoreBankingRaw",
+        "anonDb": "cloakBankingAnon",
+        "anonType": "",
+        "anonSubType": "",
+        "dbType": "",
+        "criteria": "singlingOut",
+        "table": "accounts",
+        "uid": "client_id",
+        "resultsDir": "./../utilityResults",
+        "flushCache":false,
+        "verbose": false
+    }
+
+]
+
