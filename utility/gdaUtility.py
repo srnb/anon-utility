@@ -1,9 +1,14 @@
 import sys
+import os
 import pprint
-sys.path.append('../library')
-from gdaScore import gdaAttack
+import json
+
+sys.path.append(os.path.abspath(r'../../attacks'))
+from library.gdaScore import gdaAttack
+from library.gdaUtilities import comma_ize,makeGroupBy
 from logging.handlers import TimedRotatingFileHandler
 import  logging
+from statistics import mean,median,stdev
 
 pp = pprint.PrettyPrinter(indent=4)
 _Log_File="../log/utility.log"
@@ -20,183 +25,241 @@ def createTimedRotatingLog():
 logging = createTimedRotatingLog()
 
 class gdaUtility:
-    _allresults={}
-    _nocoldiff=0
-    _accuracy=1.0000
-    _coverage=1.0000
-    def __init__(self,accuracy,coverage):
-        self.accuracy=accuracy
-        self.coverage=coverage
-        gdaUtility._nocoldiff=gdaUtility._nocoldiff+1
-        gdaUtility._allresults.update({str(gdaUtility._nocoldiff):{self.coverage,self.accuracy}})
+    def __init__(self):
+        self._ar={}
 
 
-    #Method to get tables and columns from rawDb and anonDb
-    def _getTableAndColumns(self,params):
+    #Method to calculate Utility Measure
+    def _distinctUidUtilityMeasureSingleAndDoubleColumn(self,param):
+        attack = gdaAttack(param)
+        table = attack.getAttackTableName()
+        rawColNames = attack.getColNames(dbType='rawDb')
+        anonColNames = attack.getColNames(dbType='anonDb')
+        colNames = list(set(rawColNames) & set(anonColNames))
+        self._ar['singleColumnScores'] = {}
+        tableDictList=[]
+        tableDictListMul=[]
+        for colName in colNames:
+
+            sql = "SELECT "
+            sql += (colName)
+            sql += str(f", count( distinct {param['uid']}) FROM {table} ")
+            sql += makeGroupBy([colName])
+
+
+            query = dict(db="raw", sql=sql)
+            attack.askKnowledge(query)
+            reply = attack.getKnowledge()
+
+            #
+            if 'answer' not in reply:
+                print("ERROR: reply to claim query contains no answer")
+                pp.pprint(reply)
+                attack.cleanUp()
+                sys.exit()
+            rawDbrows=reply['answer']
+
+            
+            query = dict(db="anon", sql=sql)
+            attack.askAttack(query)
+            reply = attack.getAttack()
+
+            if 'answer' not in reply:
+                print("ERROR: reply to claim query contains no answer")
+                pp.pprint(reply)
+                attack.cleanUp()
+                sys.exit()
+            anonDbrows=reply['answer']
+            anonDbrowsDict = {}
+            rawDbrowsDict = {}
+            for row in anonDbrows:
+                anonDbrowsDict[row[0]] = row[1]
+            for row in rawDbrows:
+                rawDbrowsDict[row[0]] = row[1]
+            covAndAccSingle= self._calAccuracyAndCoverage(rawDbrowsDict,anonDbrowsDict,[colName])
+            tableDictList.append(covAndAccSingle)
+
+            self.coverageAndAccuracyMUltipleCol(anonDbrows, attack, colName, colNames, query, rawDbrows,
+                                                tableDictListMul,table)
+        self._ar['singleColumnScores']=tableDictList
+        self._ar['doubleColumnScores']=tableDictListMul
+        self._ar['tableStats']={}
+        self._ar['tableStats']['colNames']=colNames
+        attackResult = attack.getResults()
+        self._ar['operational']=attackResult['operational']
+        attack.cleanUp()
+
+
+    #Method to calculate coverage and accuracy: MultipleColumns
+    def coverageAndAccuracyMUltipleCol(self, anonDbrows, attack, colName, colNames, query, rawDbrows, tableDictListMul,table):
+        for j in range(colNames.index(colName) + 1, len(colNames)):
+            colNameMul = []
+            colNameMul.append(colName)
+            colNameMul.append(colNames[j])
+            sql = "SELECT "
+            sql += comma_ize(colNameMul, False)
+            sql += str(f", count( distinct {param['uid']}) FROM {table} ")
+            sql += makeGroupBy(colNameMul)
+
+            # Query using function provided by Attack.(Not working currently!!!)
+
+            query['sql'] = sql
+            query['db'] = "raw"
+            attack.askKnowledge(query)
+            reply = attack.getKnowledge()
+
+            if 'answer' not in reply:
+                print("ERROR: reply to claim query contains no answer")
+                pp.pprint(reply)
+                attack.cleanUp()
+                sys.exit()
+            for row in reply['answer']:
+                rawDbrows = reply['answer']
+
+            query['db'] = "anon"
+            attack.askAttack(query)
+            reply = attack.getAttack()
+
+            if 'answer' not in reply:
+                print("ERROR: reply to claim query contains no answer")
+                pp.pprint(reply)
+                attack.cleanUp()
+                sys.exit()
+            for row in reply['answer']:
+                anonDbrows = reply['answer']
+
+            anonDbrowsDict = {}
+            rawDbrowsDict = {}
+            for row in anonDbrows:
+                anonDbrowsDict[str(row[0]) + '-' + str(row[1])] = row[2]
+            for row in rawDbrows:
+                rawDbrowsDict[str(row[0]) + '-' + str(row[1])] = row[2]
+            coverAndAccuDouble = self._calAccuracyAndCoverage(rawDbrowsDict, anonDbrowsDict, colNameMul)
+            tableDictListMul.append(coverAndAccuDouble)
+
+    #Finish utility Measure: Write output to a file.
+    def _finishGdaUtility(self,params):
+        if 'finished' in params:
+            del params['finished']
+        final = {}
+        final.update(self._ar)
+        final['params'] = params
+        final['finished'] = True
+        j = json.dumps(final, sort_keys=True, indent=4)
+        resultsPath = params['resultsPath']
         try:
-            x=gdaAttack(params)
-            rawDbdict=dict()
-            anonDbdict=dict()
-            rawdbType='rawDb'
-            anondbType='anonDb'
-            #get table and columns of rawDb
-            tables = x.getTableNames(dbType=rawdbType)
-            for table in tables:
-                cols = x.getColNamesAndTypes(dbType=rawdbType,tableName=table)
-                rawDbdict[table]=cols
-            #get table and columns of anonDb
-            tables = x.getTableNames(dbType=anondbType)
-            for table in tables:
-                cols = x.getColNamesAndTypes(dbType=anondbType, tableName=table)
-                anonDbdict[table] = cols
-            logging.info('RawDb Dictionary and AnnonDb Dictionary: %s and %s',rawDbdict,anonDbdict)
-            x.cleanUp()
+            f = open(resultsPath, 'w')
         except:
-            logging.error('Error occured while connecting dB or cleaning up the used resources: anonDBStatus %s : rawDbStatus %s',anonDbdict,rawDbdict)
-        return rawDbdict,anonDbdict
+            e = str(f"Failed to open {resultsPath} for write")
+            sys.exit(e)
+        f.write(j)
+        f.close()
+        return final
 
-    #Method to check columns present in rawDb, but not in anonDb
-    def _checkExtraColumninrawDb(self,rawDbDictionary,anonDbDictionary):
-        _noColumns=0;
-        _excludedColumnsList={}
-        _columnPosition=0;
-        _columnTypePosition=1;
-        logging.info('Inside the method:_checkExtraColumninrawDb')
-        for table in rawDbDictionary:
-            _excludedColumnsList[table]={}
-            rawDbList=rawDbDictionary[table]
-            #construct anonDb column list to check rawDb columns are present.
-            anonDbList=anonDbDictionary[table]
-            anonDbColumns=[]
-            for anonDbColumnDesc in anonDbList:
-                anonDbColumns.append(anonDbColumnDesc[_columnPosition])
-            #check if anonDb contains all the columns that are in rawDb, if not increment the _noColumns
-            for rawDbColumnDesc in rawDbList:
-                if not rawDbColumnDesc[_columnPosition] in anonDbColumns:
-                    _noColumns=_noColumns+1
-                    _excludedColumnsList[table][rawDbColumnDesc[_columnPosition]]=rawDbColumnDesc[_columnTypePosition]
-            logging.info('Number of columns that are not excluded for query: %s and the completeList: %s',_noColumns,_excludedColumnsList)
-        return _noColumns,_excludedColumnsList
-
-
-    #Method to check generate histogram
-    def _generateHistogram(self,params,rawdb,anondb,clientId='client_id'):
-        x=gdaAttack(params)
-        _noOftry=1
-        _columnPosition = 0;
-        _coverage={}
-        _accuracyAbsolute={}
-        _accuracyRelative={}
-        _noQueries=0
-        try:
-            for table in rawdb:
-                _coverage[table] = {}
-                _accuracyAbsolute[table] = {}
-                _accuracyRelative[table] = {}
-                for columnDesc in rawdb[table]:
-                    columnName=columnDesc[_columnPosition]
-                    _coverage[table][columnName]=[]
-                    _accuracyAbsolute[table][columnName]=[]
-                    _accuracyRelative[table][columnName]=[]
-                    sql=str(f"SELECT {columnName}, count(distinct {clientId}) FROM {table} GROUP BY 1")
-                    logging.info('RawDb-Query: %s',sql)
-                    _noQueries=_noQueries+1
-                    query = dict(db="raw", sql=sql)
-                    answer = self._queryDb(_noOftry, sql, x,query)
-                    rawDbrows=answer['answer']
-                    rawDbrowsDict={}
-                    logging.info('query-Answer: RowSize: %s',len(rawDbrows))
-                    for row in rawDbrows:
-                        rawDbrowsDict[row[0]]=row[1]
-                    if len(rawDbrows) > 1:
-                        query = dict(db="anon", sql=sql)
-                        sql = str(f"SELECT {columnName}, count(distinct {clientId}) FROM {table} GROUP BY 1")
-                        logging.info('AnonDb-Query: %s', sql)
-                        #print(f"sql is {sql}")
-                        answer = self._queryDb(_noOftry, sql, x,query)
-                        anonDbrows = answer['answer']
-                        anonDbrowsDict = {}
-                        logging.info('query-Answer: RowSize: %s', len(anonDbrows))
-                        for row in anonDbrows:
-                            anonDbrowsDict[row[0]] = row[1]
-                        _excluderows=0;
-                        for key in  anonDbrowsDict:
-                            if key  in rawDbrowsDict.keys():
-                                _accuracyAbsolute[table][columnName].append(str(abs(anonDbrowsDict[key]-rawDbrowsDict[key])))
-                                _accuracyRelative[table][columnName].append(str((abs(anonDbrowsDict[key]-rawDbrowsDict[key]))/(max(anonDbrowsDict[key],rawDbrowsDict[key]))))
-                                _excluderows=_excluderows+1
-                        _coverage[table][columnName]=str(1-((abs(len(rawDbrowsDict)-_excluderows))/len(rawDbrowsDict)))
-                        #print(f"Size of rawDbRows: {len(rawDbrows)} and anonDbRows: {len(anonDbrows)}")
-                    elif (len(rawDbrows))==1:
-                        _coverage[table][columnName] = None
-
-            x.cleanUp()
-        except:
-            logging.error('Error occured while querying or while cleaning up the used resources')
-        return _accuracyAbsolute,_coverage,_noQueries,_accuracyRelative;
+    #Method to calculate Coverage and Accuracy
+    def _calAccuracyAndCoverage(self,rawDbrowsDict,anonDbrowsDict,colNames):
+        logging.info('RawDb Dictionary and AnnonDb Dictionary: %s and %s', rawDbrowsDict, anonDbrowsDict)
+        noColumnCountOnerawDb=0
+        noColumnCountMorerawDb=0
+        valuesInBoth=0
+        accuracy=dict()
+        coverage=dict()
+        accuracyFlag=True
+        for rawkey in rawDbrowsDict:
+            if rawDbrowsDict[rawkey]==1:
+                noColumnCountOnerawDb=noColumnCountOnerawDb+1
+            else:
+                noColumnCountMorerawDb=noColumnCountMorerawDb+1
+        absoluteErrorList=[]
+        simpleRelativeErrorList=[]
+        relativeErrorList=[]
+        for anonkey in anonDbrowsDict:
+            if anonkey in rawDbrowsDict:
+                if rawDbrowsDict[anonkey] >1:
+                    valuesInBoth=valuesInBoth+1
+                absoluteErrorList.append((abs(anonDbrowsDict[anonkey] - rawDbrowsDict[anonkey])))
+                simpleRelativeErrorList.append((rawDbrowsDict[anonkey]/anonDbrowsDict[anonkey]))
+                relativeErrorList.append((
+                    (abs(anonDbrowsDict[anonkey] - rawDbrowsDict[anonkey])) / (max(anonDbrowsDict[anonkey], rawDbrowsDict[anonkey]))))
+        valuesanonDb=len(anonDbrowsDict)
+        absoluteError=0.0
+        simpleRelativeError=0.0
+        relativeError=0.0
+        if(len(absoluteErrorList)>0):
+            accuracyFlag=False
+            for item in absoluteErrorList:
+                absoluteError += item * item
+            absoluteError=absoluteError/len(absoluteErrorList);
+            for item in simpleRelativeErrorList:
+                simpleRelativeError+=item*item
+            simpleRelativeError=simpleRelativeError/len(simpleRelativeErrorList);
 
 
-    def _generateHistogramForTwoColumns(self,params,rawdb,anondb,columnPairs=2,client_id='client_id'):
-        #print(f"Number of column Pairs for query: {columnPairs}")
-        x = gdaAttack(params)
-        _noOftry = 1
-        _columnPosition = 0;
-        _coverage = {}
-        _accuracyAbsolute = {}
-        _accuracyRelative = {}
-        _noQueries = 0
-        try:
-            for table in rawdb:
-                _coverage[table] = {}
-                _accuracyAbsolute[table] = {}
-                _accuracyRelative[table] = {}
-                for i in range (0,len(rawdb[table])):
-                    j=i+1
-                    column1=rawdb[table][i][0]
-                    for j in range (j,len(rawdb[table])):
-                        column2 = rawdb[table][j][0]
-                        _accuracyAbsolute[table][''+str(i)+str(j)] = []
-                        _accuracyRelative[table][''+str(i)+str(j)] = []
-                        sql = str(f"SELECT {column1},{column2}, count(distinct {client_id}) FROM {table} GROUP BY 1,2")
-                        logging.info('MultiCol:RawDb-Query: %s', sql)
-                        _noQueries = _noQueries + 1
-                        query = dict(db="raw", sql=sql)
-                        answer = self._queryDb(_noOftry, sql, x, query)
-                        #print(f" answer: {answer}")
-                        rawDbrows = answer['answer']
-                        rawDbrowsDict = {}
-                        logging.info('MultiCol:query-Answer: RowSize', len(rawDbrows))
-                        for row in rawDbrows:
-                            rawDbrowsDict[''+str(row[0])+str(row[1])] = row[2]
-                        if len(rawDbrows) > 1:
-                            query = dict(db="anon", sql=sql)
-                            sql = str(f"SELECT {column1},{column2}, count(distinct {client_id}) FROM {table} GROUP BY 1,2")
-                            logging.info('MultiCol:Anon-Query: %s', sql)
-                            answer = self._queryDb(_noOftry, sql, x, query)
-                            anonDbrows = answer['answer']
-                            anonDbrowsDict = {}
-                            logging.info('MultiCol:query-Answer: RowSize %s', len(anonDbrows))
-                            for row in anonDbrows:
-                                anonDbrowsDict[''+str(row[0])+str(row[1])] = row[2]
-                            _excluderows = 0;
-                            for key in anonDbrowsDict:
-                                if key in rawDbrowsDict.keys():
-                                    _accuracyAbsolute[table][''+str(i)+str(j)].append(
-                                        str(abs(anonDbrowsDict[key] - rawDbrowsDict[key])))
-                                    _accuracyRelative[table][''+str(i)+str(j)].append(str(
-                                        (abs(anonDbrowsDict[key] - rawDbrowsDict[key])) / (
-                                            max(anonDbrowsDict[key], rawDbrowsDict[key]))))
-                                    _excluderows = _excluderows + 1
-                            _coverage[table][''+str(i)+str(j)] = str(
-                                1 - ((abs(len(rawDbrowsDict) - _excluderows)) / len(rawDbrowsDict)))
-                            # print(f"Size of rawDbRows: {len(rawDbrows)} and anonDbRows: {len(anonDbrows)}")
-                        elif (len(rawDbrows)) == 1:
-                            _coverage[table][''+str(i)+str(j)] = None
+            for item in relativeErrorList:
+                relativeError+=item*item
+            relativeError=relativeError/len(relativeErrorList);
+            accuracy['accuracy']={}
+            accuracy['accuracy']['simpleRelativeErrorMetrics'] = {}
+            accuracy['accuracy']['relativeErrorMetrics'] = {}
 
-            x.cleanUp()
-        except:
-            logging.error('Error occured while querying or while cleaning up the used resources')
-        return _accuracyAbsolute, _coverage, _noQueries, _accuracyRelative;
+            absoluteDict={}
+            absoluteDict['min']=min(absoluteErrorList)
+            absoluteDict['max'] = max(absoluteErrorList)
+            absoluteDict['avg'] = mean(absoluteErrorList)
+            if (len(absoluteErrorList)>1):
+                absoluteDict['stddev'] = stdev(absoluteErrorList)
+            else:
+                absoluteDict['stddev'] = None
+            absoluteDict['meanSquareError'] = absoluteError
+            absoluteDict['compute']="(count(distinct_rawDb)-count(distinct_anonDb))"
+            accuracy['accuracy']['absolErrorMetrics']=absoluteDict
+
+            #SimpleErrorRelativeDictionary
+            simpleRelativeDict={}
+            simpleRelativeDict['min'] = min(simpleRelativeErrorList)
+            simpleRelativeDict['max'] = max(simpleRelativeErrorList)
+            simpleRelativeDict['avg'] = mean(simpleRelativeErrorList)
+            if(len(simpleRelativeErrorList)>1):
+                simpleRelativeDict['stddev'] = stdev(simpleRelativeErrorList)
+            else:
+                simpleRelativeDict['stddev'] = None
+            simpleRelativeDict['meanSquareError'] = simpleRelativeError
+            simpleRelativeDict['compute'] = "(count(distinct_rawDb)/count(distinct_anonDb))"
+            accuracy['accuracy']['simpleRelativeErrorMetrics'] = simpleRelativeDict
+
+            #RelativeErrorDictionary
+            relativeDict = {}
+            relativeDict['min'] = min(relativeErrorList)
+            relativeDict['max'] = max(relativeErrorList)
+            relativeDict['avg'] = mean(relativeErrorList)
+            if(len(relativeErrorList)>1):
+                relativeDict['stddev'] = stdev(relativeErrorList)
+            else:
+                relativeDict['stddev'] = None
+
+            relativeDict['meanSquareError'] = relativeError
+            simpleRelativeDict['compute'] = "(abs(count(distinct_rawDb)-count(distinct_anonDb))/max(count(distinct_rawDb),count(distinct_anonDb)))"
+            accuracy['accuracy']['relativeErrorMetrics'] = relativeDict
+        #Coverage Metrics
+        coverage['coverage'] = {}
+        coverage['coverage']['colCountOneRawDb']=noColumnCountOnerawDb
+        coverage['coverage']['colCountManyRawDb']=noColumnCountMorerawDb
+        coverage['coverage']['valuesInBothRawAndAnonDb']=valuesInBoth
+        coverage['coverage']['totalValCntAnonDb']=valuesanonDb
+        if(noColumnCountMorerawDb==0):
+            coverage['coverage']['coveragePerCol'] =None
+        else:
+            coverage['coverage']['coveragePerCol']=valuesInBoth/noColumnCountMorerawDb
+        if(accuracyFlag):
+            accuracy['accuracy'] = None
+        columnParam={}
+        colPos=1
+        for col in colNames:
+            columnParam["col"+str(colPos)]=col
+            colPos = colPos + 1
+        columnParam.update(accuracy)
+        columnParam.update(coverage)
+        return columnParam
 
     #Method to query the database and returns the fetched tuples.
     def _queryDb(self, _noOftry, sql, x,query):
@@ -213,79 +276,99 @@ class gdaUtility:
         return answer
 
 
-#rawdb,anondb=gdaUtility._getTableAndColumns('gdaScoreBankingRaw','cloakBankingAnon')
+
+    def _setupGdautilityParameters(self,cmdArgs, criteria=''):
+        """ Basic prep for input and output of running gdaUtility
+
+            `cmdArgs` is the command line args list (`sys.argv`) <br/>
+            `cmdArgs[1]` is either the name or the config file, or
+            empty if the default config file name should be used. <br/>
+            Returns a list of data structure that can be used for
+            class `gdaUtility` <br/>
+            Adds the following to the returned data structure (`par`) <br/>
+            `par['finished']`: `True` if attack previously completed.
+            Else `False` <br/>
+            `par['resultsPath']`: Path to filename where results should
+            be stored. <br/>
+            `par['criteria']: if one of the calling parameters.
+        """
+
+        pp = pprint.PrettyPrinter(indent=4)
+        usageStr = str(f"""Usage: 
+            Either specify configuration file:
+                > {cmdArgs[0]} config.json
+            Or assume default configuration file '{cmdArgs[0]}.json':
+                > {cmdArgs[0]}
+            """)
+        if len(cmdArgs) == 1:
+            fileName = cmdArgs[0] + '.json'
+        elif len(cmdArgs) != 2:
+            sys.exit(usageStr)
+        else:
+            fileName = sys.argv[1]
+
+        try:
+            f = open(fileName, 'r')
+        except:
+            e = str(f"ERROR: file '{fileName}' not found.\n{usageStr}")
+            sys.exit(e)
+
+        pmList = json.load(f)
+        f.close()
+        for pm in pmList:
+            if 'criteria' not in pm or len(pm['criteria']) == 0:
+                if not criteria:
+                    sys.exit("ERROR: criteria must be specified")
+                pm['criteria'] = criteria
+
+            if 'name' not in pm or len(pm['name']) == 0:
+                baseName = str(f"{sys.argv[0]}")
+                if 'anonType' in pm and len(pm['anonType']) > 0:
+                    baseName += str(f".{pm['anonType']}")
+                if 'anonSubType' in pm and len(pm['anonSubType']) > 0:
+                    baseName += str(f".{pm['anonSubType']}")
+                if 'dbType' not in pm or len(pm['dbType']) == 0:
+                    baseName += str(f".{pm['rawDb']}.{pm['anonDb']}")
+                else:
+                    baseName += str(f".{pm['dbType']}")
+                if 'table' in pm and len(pm['table']) > 0:
+                    baseName += str(f".{pm['table']}")
+            else:
+                baseName = pm['name']
+            pm['name'] = baseName
+
+            resultsDir = "utilityResults";
+            if 'resultsDir' in pm and len(pm['resultsDir']) > 0:
+                resultsDir = pm['resultsDir']
+
+            resultsPath = resultsDir + "/" + baseName + ".json"
+            pm['resultsPath'] = resultsPath
+            pm['finished'] = False
+            try:
+                f = open(resultsPath, 'r')
+            except:
+                # No prior results for this utility measure have been posted
+                pass
+            else:
+                # Prior results have been posted. Make sure they are complete.
+                res = json.load(f)
+                if 'finished' in res:
+                    pm['finished'] = True
+
+        return pmList
 
 
 
-obj1=gdaUtility(accuracy=1,coverage=1)
-params = dict(name='utilitygdaUtility',rawDb='gdaScoreBankingRaw',anonDb='cloakBankingAnon',table='accounts',criteria='singlingOut',flushCache=True,verbose=False)
-rawdb,anondb=obj1._getTableAndColumns(params)
-noColumns,columnsOnlyInrawDb=obj1._checkExtraColumninrawDb(rawdb,anondb)
-#print (f"rawdb {rawdb}")
-primary_key='client_id'
-accuracy,coverage,noQueries,accuracyRelative=obj1._generateHistogram(params,rawdb,anondb,primary_key)
 
-print(f"overall coverage calculation:")
-sum=0
-for key in coverage:
-    for columnk in coverage[key]:
-     #print(f"column {columnk}")
-     if coverage[key][columnk] is not None:
-         sum = sum + float(coverage[key][columnk])
-logging.info('Number of queries:%s ',noQueries)
-print(f"Total Coverage for Single Column:{(sum/noQueries)}")
+gdaUtilityObj=gdaUtility()
+paramsList = gdaUtilityObj._setupGdautilityParameters(sys.argv, criteria="singlingOut")
+for param in paramsList:
+    if param['finished'] == True:
+        print("The following Utility measures has been previously completed:")
+        #pp.pprint(param)
+        print(f"Results may be found at {param['resultsPath']}")
+        continue
+    gdaUtilityObj._distinctUidUtilityMeasureSingleAndDoubleColumn(param)
+    gdaUtilityObj._finishGdaUtility(param)
 
 
-def meanSquareError(accuracy,value='absol'):
-    accuracyAbsPerCol = {}
-    for tableAcc in accuracy:
-        accuracyAbsPerCol[tableAcc] = {}
-        for columnName in accuracy[tableAcc]:
-            sum = 0
-            j = 0;
-            acc_score = 0
-            if (accuracy[tableAcc][columnName] is not None and len(accuracy[tableAcc][columnName]) >= 1):
-                for value in accuracy[tableAcc][columnName]:
-                    if value == 'absol':
-                        sum = sum + int(value)
-                    else:
-                        sum = sum + float(value)
-                    j = j + 1
-                if (j != 0):
-                    acc_score = sum / j
-                    accuracyAbsPerCol[tableAcc][columnName] = str(acc_score)
-    return accuracyAbsPerCol
-
-accuracyAbsPerCol=meanSquareError(accuracy)
-accuracyRelativePerCol=meanSquareError(accuracyRelative,'relative')
-
-
-#for key in accuracy:
-#    print(f"key {key} and value : {accuracy[key]}")
-#print(f"raw db {rawdb}")
-#print(f"anon db {anondb}")
-
-
-print(f"Mean Absolute Error Per Column: {accuracyAbsPerCol}")
-print(f"Mean Absolute Error Per Column: {accuracyRelativePerCol}")
-'''
-accuracyValltiColumn,coverageMultiColumn,noQueriesMultiCol,accuracyValueRelativeMulticol=obj1._generateHistogramForTwoColumns(params,rawdb,anondb,primary_key)
-
-print(f"------------------------------------------------")
-print(f"MultiColumn------------------------------------------------")
-print(f" no of queries : {noQueriesMultiCol}")
-print(f"overall coverage calculation:")
-sum=0
-for key in coverageMultiColumn:
-    for columnk in coverageMultiColumn[key]:
-     #print(f"column {columnk}")
-     if coverageMultiColumn[key][columnk] is not None:
-         sum = sum + float(coverageMultiColumn[key][columnk])
-logging.info('Number of queries MultiCol:%s ',noQueriesMultiCol)
-print(f"Total Coverage for MultiCol Column:{(sum/noQueriesMultiCol)}")
-accuracyMultiCol=meanSquareError(accuracyValltiColumn)
-accuracyRelativeMultiCol=meanSquareError(accuracyValueRelativeMulticol,'relative')
-print(f"Mean Absolute Error Per Column: {accuracyMultiCol}")
-print(f"Mean Absolute Error Per Column: {accuracyRelativeMultiCol}")
-
-'''
